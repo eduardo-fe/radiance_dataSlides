@@ -1,0 +1,224 @@
+---
+title: 'Worksheet 1: Regularisation'
+author: "Eduardo Fe"
+date: "2023-12-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+ 
+ 
+```{r include=FALSE}
+library(glmnet)
+library(tidyverse)
+library(kableExtra)
+library(stargazer)
+df <- read.csv("~/Documents/teaching/Radiance/module_mlci/datasets/cars2022.csv")
+df<-na.omit(df)
+```
+
+In this session we are going to estimate a Lasso model using a bespoke dataset. The data we have provided were scrapped in February 2022 from Autotrader (a used cars website in the U.K.). It contains the price of 150,0076 cars alongside some of the cars' charateristics, including:
+
+- **`model`** the brand of the car
+- **`price`**
+- **`year`** of registration
+- **`fuel`** type
+- **`miles`**
+- **`litres`** of engine capacity (a proxy for engine power)
+- **`owners`** how many main drivers have owned the car
+- **`style`** (Hatchback, convertible, etc)
+- **`t`** age
+- **`powerHPS`** Power in mechanical horse power
+
+We are going to load the data into a `data.frame` called `df`. 
+
+The main objective is to estimate a parsimonious linear additive model that generates the best possible predictions of the price of a used car. As we progress towards that goal, we will introduce some ancillary methods to produce tables and graphs in R Markdown. 
+
+For this activity, we will need a few libraries:
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+library(glmnet)
+library(tidyverse)
+library(kableExtra)
+library(stargazer)
+```
+The key library is `glmnet`, which implements several linear models, including OLS, LASSO and Ridge Regression. 
+
+Before doing any analysis, we are going to, first, eliminate all entries with a missing value. Then we will re-define some of our variables as factors (that is, categorical variables):
+```{r}
+df<-na.omit(df)
+df$model<- as.factor(df$model)
+df$fuel<- as.factor(df$fuel)
+df$style <-as.factor(df$style)
+```
+ 
+As a last preparation,  we are going to create a training and test sets by generating a vector that contains a random collection of observations. This vector will be used to tell `R` which observations are training observations and which ones are not. We are going to create a "model matrix", that is a frame that contains all the explanatory variables we will use. 
+
+```{r}
+# Train/Test identifier
+set.seed(1)
+train<-sample(1:nrow(df),floor(0.8*nrow(df)))
+
+# Model matrix.
+response <- df$price
+predictors <- subset(df, select = c("t", "model","fuel","owners","style","miles","powerHPS")) 
+predictors<-model.matrix(~t+miles + model+fuel+owners+powerHPS -1,predictors)
+```
+
+To obtain a nice table with descriptive statistics, you can use sequence of commands such as this (we rely on the library `kable`):
+  
+```{r , warning=FALSE,message=FALSE}
+
+tempTrain<-df[,c("price","year","miles","owners")]
+tempTrain<-tempTrain[train,]
+tempTest<-df[,c("price","year","miles","owners")]
+tempTest<-tempTest[-train,]
+# Calculate means and variances for my_data1
+means_1 <- sapply(tempTrain, function(x) round(mean(x, na.rm = TRUE), 3))
+#variances_1 <- sapply(traindata, function(x) round(var(x, na.rm = TRUE), 3))
+
+# Calculate means and variances for my_data2
+means_2 <- sapply(tempTest, function(x) round(mean(x, na.rm = TRUE), 3))
+#variances_2 <- sapply(testdata, function(x) round(var(x, na.rm = TRUE), 3))
+
+# Create summary tables for each data frame
+summary_table_1 <- data.frame(Variable = names(tempTrain),
+                              Mean = means_1)
+
+summary_table_2 <- data.frame(Variable = names(tempTest),
+                              Mean = means_2)
+
+# Merge the summary tables side by side
+merged_summary <- merge(summary_table_1, summary_table_2, by = "Variable", suffixes = c("_data1", "_data2"))
+names(merged_summary) <- c("Variable", "Mean train",  "Mean Test")
+
+# Print the merged table
+#knitr::kable(merged_summary)
+
+merged_summary %>%
+  kable() %>%
+  kable_styling(full_width = FALSE, position = "center") %>%
+  column_spec(1, width = "20%") %>%
+  column_spec(2:3, width = "20%")
+```
+
+```{r echo=FALSE}
+rm(tempTest)
+rm(tempTrain)
+```
+
+You can procude a bar chart for the categorical variables as follows:
+  
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+
+# Create the bar chart with proportions
+fig1<-ggplot(df[train,], aes(x = model, y = stat(count) / sum(stat(count)))) +
+  geom_bar(aes(fill = model), position = "dodge", width = 0.5) +
+  labs(x = "Brand", y = "Proportion")+theme_minimal()+coord_flip()+theme(legend.position = "none")
+
+
+# Create the bar chart with proportions
+fig2<-ggplot(df[train,], aes(x = owners, y = stat(count) / sum(stat(count)))) +
+  geom_bar(aes(fill = owners), position = "dodge", width = 0.5) +
+  labs(x = "Owners", y = "Proportion") +
+  theme_minimal()+coord_flip()+theme(legend.position = "none")
+
+# Create the bar chart with proportions
+fig3<-ggplot(df[train,], aes(x = fuel, y = stat(count) / sum(stat(count)))) +
+  geom_bar(aes(fill = fuel), position = "dodge", width = 0.5) +
+  labs(x = "Fuel type", y = "Proportion") +
+  theme_minimal()+coord_flip()+theme(legend.position = "none")
+
+library(gridExtra)
+grid.arrange(fig1, fig2, fig3, nrow = 3)
+```
+
+
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Load required libraries
+library(broom)
+library(knitr)
+library(kableExtra)
+
+
+# Fit a linear regression model
+model.reg <- lm(price ~ t + model+fuel+owners +miles+powerHPS, data = traindata)
+
+# Extract coefficients and standard errors
+model_summary <- tidy(model.reg)
+
+# Add significance stars for p-values
+model_summary$stars <- ifelse(model_summary$p.value < 0.001, "***",
+                              ifelse(model_summary$p.value < 0.01, "**",
+                                     ifelse(model_summary$p.value < 0.05, "*", "")))
+
+# Format the table with coefficients, standard errors, and significance stars
+kable(model_summary[, c("term", "estimate", "std.error", "stars")], 
+      align = "l", caption = "Regression Coefficients, Standard Errors, and Significance") %>%
+  kable_styling(full_width = FALSE, position = "center") %>%
+  column_spec(1:4, width = "20%")
+
+
+```
+
+We next estimate a linear regression model[^1] via OLS. To this end we use the `lm` command from the base `R` distribution. We will fit this model to the training data only:
+
+[^1]: We ignore considerations about the robustness of the standard errors. If you wanted to compute cluster robust standard errors using the variable, say, `model` then the following command will do that for you: `cluster_se <- coeftest(model.reg, vcov = vcovCL(model.reg, cluster = df$model))`
+
+```{r}
+
+# Fit a linear regression model
+
+model.reg<-lm(response[train]~predictors[train,], data=df)
+summary(model.reg)
+```
+
+This estimated model has a linear coefficient of determination $R^2$ of 0.54. According to this model, each new year of life, `t`, decreases the price of the car by GBP1231. The brand of the car matters significantly. The omitted model (Volkswagen) has an average price of GBP19,410. Mercedes cars are GBP1346 more expensive. Land Rovers appear considerably pricier (on average, GBP10,000 more expensive), whereas the least expensive cars in the data are Mini and Vauxhall. Note that Land Rover specializes in large SUVs (which are expensive), while all other brands offer a range of models, some more affordable (such as the Mercedes Class A or the Toyota Yaris). The coefficient of `miles` is 0.09954, so each 1000 miles decreases the car's price by GBP99.54. Finally, each additional horsepower implies an increase of GBP98 in the final price of the car. The type of fuel does not seem to matter much.
+
+We now consider regularisation via LASSO, which can  be deployed using the library `glmnet`
+```{r message=FALSE, warning=FALSE}
+grid<-10^seq(-2,4,length=100)
+
+modelLasso <- glmnet(predictors[train,],response[train], alpha=1,lambda=grid)
+library(plotmo)
+plot_glmnet(modelLasso)
+
+```
+In `glmnet`,  `lambda` is the regularisation parameter and is defined by the user; in this case, we have estimated 100 such models for 100 differnt values of `lambda`. The parameter `alpha` determines the type of regulariser we deploy. When `alpha`=0 `glmnet` estimates a Ridge Regression; if we set both `alpha` and `lambda` to 0, then the resulting model is OLS. 
+
+We can obtain the coefficients for a given `labmda` (say the 50th value of lambda we considered) as
+```{r}
+coef(modelLasso)[,50]
+```
+These coefficients could be compared one-to-one with those we obtained in the regression model. For instance, the LASSO model suggests that 1 extra year of life brings the value of the car down by GBP1200 (as opposed to GBP1000), whereas the effect of 1000 additional miles is lower, at GBP94. 
+Ultimately, we just one a single value of `lambda`. To this end, we are going to apply cross-validation (10-Fold cross-validation, the default choice):
+```{r}
+model.cv<-cv.glmnet(predictors[train,],response[train], alpha=1)
+lambdaStar<- model.cv$lambda.min #Save the optimal value of Lambda
+# Extract coefficients at the minimum lambda value
+min_lambda_index <- which.min(model.cv$cvm)
+coefficients_min_lambda <- coef(model.cv, s = model.cv$lambda[min_lambda_index])
+
+coefficients_min_lambda
+
+```
+The model with the smallest error is not too different to the model we obtained with OLS. THe `cv.glmnet` has selected a different brand as the baseline category (Nissan, instead of Volkswagen) and that explains the large difference in the coefficient of the intercept. Otherwise, the effect of `miles`, `t` and number of `owners` are relatively similar. 
+
+The final check involves comparing the performance of the LASSO model with that of the linear regression model using the test data. This comparison is based on each model's Mean Squared Error: 
+
+```{r}
+
+Yhat.lasso<-predict(model.cv, s=lambdaStar, newx=predictors[-train,])
+MSE.lasso <- mean((response[-train]-Yhat.lasso)^2)
+log(MSE.lasso)
+
+Yhat.reg <-predict(model.reg, newx=predictors[-train,])
+MSE.reg <- mean((response[-train]-Yhat.reg)^2)
+log(MSE.reg)
+```
+
+Thus, it seems that the LASSO results in an improvement in terms of prediction.
+

@@ -1,0 +1,197 @@
+---
+title: 'Work sheet 2: Trees'
+author: "Eduardo Fe"
+date: "2023-12-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+```{r include=FALSE}
+winequality.red <- read.csv("~/Documents/teaching/machine_learning/classactivity/winequality-red.csv", sep=";")
+winequality.white <- read.csv("~/Documents/teaching/machine_learning/classactivity/winequality-white.csv", sep=";")
+winequality.red$red<- 1
+winequality.white$red<- 0
+df<-rbind(winequality.red, winequality.white)
+df$qual2<-as.factor(df$quality)
+```
+
+
+In this document, we'll perform regression tree analysis and compare it with random forest. We first introduce the main commands alongside the `wine` dataset. Then you are asked to apply these techniques to a new dataset. The goal is to:
+
+1. Fitting a regression tree (with and without cross-validation).
+2. Plotting the tree and comparing pruned vs. non-pruned models.
+3. Fitting a random forest model.
+4. Comparing the performances of the regression tree and random forest.
+
+Our first step is to load the required libraries.
+```{r message=FALSE, warning=FALSE}
+# Load necessary libraries
+library(rpart)        # To fit trees
+library(rattle)       # To produce nice tree plots
+library(randomForest) # To fit trees via Bagging and Random Forest
+library(sp)           # A library for spatial analysis containing the data 
+library(kableExtra)
+library(vip)
+```
+There are several different libraries to fit regression/classification trees. `rpart` is a popular and comprehensive package for building decision trees with control over tree complexity. `party` offers an extended framework with advanced methods like conditional inference trees and random forests. `tree` is a simpler package for basic tree building but may lack some advanced functionalities present in the others. Choosing between them often depends on the specific needs of the analysis and the complexity of the problem at hand. Here we will stick to `rpart`.
+
+Our data contains over 6000 evaluations of Portuguese red and white wines. The data is a companion to the paper:
+
+*P. Cortez, A. Cerdeira, F. Almeida, T. Matos and J. Reis. Modeling wine preferences by data mining from physicochemical properties. Decision Support Systems, Elsevier, 47(4):547-553. ISSN: 0167-9236.*
+
+It contains the following variables:
+
+- **`fixed.acidity`**
+- **`volatile.acidity`**
+- **`citric.acid`**
+- **`residual.sugar`**
+- **`chlorides`**
+- **`free.sulfur.dioxide`**
+- **`total.sulfur.dioxide`**
+- **`density`**
+- **`pH`**
+- **`sulphates`**
+- **`alcohol`**
+- **`quality`** (score between 0 and 10)
+- **`qual2`** (identical to quality, but declared as a `factor`)
+- **`red`**(and indicator of red wine -1- or white wine -0)
+   
+
+We are going to focus on predicting  the quality indicator as a function of the remaining attributes. This is a task for which Machine Learning should really well suited. 
+As our first step we are going to split the data into a training and test datasets. The data contains 6497 observations so we can do that comfortably. We will do an 60% and 40% split. We will train the trees on the training data and evaluate the models' predictive quality on the test data. This step can be done using a package, such as `caret`, however it is illustrative to split the data old style (NOTE: Don't forget to load the data into your work space and call the data frame `df` -you could call the frame whatever you want but if you do so, you need to modify all the commands below accordingly).
+```{r}
+set.seed(1)
+train<-sample(1:nrow(df),floor(0.8*nrow(df)))
+testdata <-df[-train,]
+traindata<- df[train,]
+```
+You can obtain descriptive statistics for these data sets using `summary()`. These are the descriptive statistics for the train and test data sets:
+
+```{r echo=FALSE, warning=FALSE,message=FALSE}
+# Calculate means and variances for my_data1
+means_1 <- sapply(traindata, function(x) round(mean(x, na.rm = TRUE), 3))
+#variances_1 <- sapply(traindata, function(x) round(var(x, na.rm = TRUE), 3))
+
+# Calculate means and variances for my_data2
+means_2 <- sapply(testdata, function(x) round(mean(x, na.rm = TRUE), 3))
+#variances_2 <- sapply(testdata, function(x) round(var(x, na.rm = TRUE), 3))
+
+# Create summary tables for each data frame
+summary_table_1 <- data.frame(Variable = names(traindata),
+                              Mean = means_1)
+
+summary_table_2 <- data.frame(Variable = names(testdata),
+                              Mean = means_2)
+
+# Merge the summary tables side by side
+merged_summary <- merge(summary_table_1, summary_table_2, by = "Variable", suffixes = c("_data1", "_data2"))
+names(merged_summary) <- c("Variable", "Mean train",  "Mean Test")
+
+# Print the merged table
+#knitr::kable(merged_summary)
+
+merged_summary %>%
+  kable() %>%
+  kable_styling(full_width = FALSE, position = "center") %>%
+  column_spec(1, width = "20%") %>%
+  column_spec(2:3, width = "20%")
+```
+As you can see, both groups are very similar in all respects. We would expect the trained model to perform relatively well in the test data. 
+
+We first fit a tree, without any pruning. We are only going to request that *leaves* have at least 50 observations 
+
+```{r}
+tree_model <- rpart(qual2~. -quality, data = traindata, cp=0, method = "class", minbucket=50)
+```
+The command `minbucket` sets the minimum number of observations each leave ought to have. Here we have set that number to 50, in a totally arbitrary fashion. The command `cp` sets the penalty for tree complexity to 0 in 
+\begin{align}
+SSE= \sum_{i\in{S}_1}(Y_i-\bar{Y}_1)^2+\sum_{i\in {S}_2}(Y_i-\bar{Y}_2)^2 + c_p {T}
+\end{align}
+(where $S_j$ is the subsample resulting after a split and $T$ stands for the number of final nodes in the tree). 
+You can verify using the command `fancyRpartPlot()` from the `rattle` library that the resulting tree has 37 final leaves (you can also use the `printcp(tree_model)` command which displays a table with the complexity parameter at each split. The total number of leaves is the largest `nsplit` plus one. 
+
+We can evaluate the performance of the tree on the test data, by calculating the mean square error, 
+\begin{align}
+MSE_{test}=\frac{1}{n_{test}}\sum_{i=1}^{n_{test}}(Y_i-\hat{Y}_i)^2
+\end{align}, where $\hat{Y_i}$ are the predictions generated by the fitted tree, which can be obtained using the command `predict(, newdata=)`, where `newdata` specifies the data to use for the predictions (in our case, the test data). This metric, however, is not ideal since we have a classification problem (our outcome is categorical). An alternative metric is the proportion of accurate scores predicted by the model:
+\begin{align}
+\frac{1}{n_{train}}\sum_{i} 1(\hat{Y}_i = Y_i)
+\end{align}
+```{r}
+yhat_tree<-predict(tree_model, newdata=testdata, type="class")
+confusion_matrix <- table(yhat_tree, testdata$qual2)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+```
+The command `type` is used to tell `predict` that the output variable is categorical (or a factor in `R`'s own jargon). The model accuracy is  `r round(accuracy*100, 3)`% accuracy.
+
+We could manually prune the tree by setting the complexity parameter. For instance, we could set $c_p=0.005$ in the `rpart()` function. This will result in the following smaller tree:
+  
+```{r echo=FALSE}
+tree_model_pruned <-rpart(qual2~. -quality, data = traindata, method="class", cp=0.005)
+fancyRpartPlot(tree_model_pruned, caption="")
+
+yhat_tree_pruned<-predict(tree_model_pruned, newdata=testdata, type="class")
+confusion_matrix <- table(yhat_tree_pruned, testdata$qual2)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+```
+
+which has accuracy `r round(accuracy*100,3)`%. Finally, we can simply run the `rpart()` function and this will find a best tree. Specifically, `rpart` splits the training data into 10 folds and, after fitting a fully grown tree to the entire training data, it applies 10-fold cross-validation to find the optimal complexity parameter:
+  
+  
+```{r}
+tree_cv<- rpart(qual2~. -quality, data = traindata, method="class")
+```
+
+which yields the tree
+
+```{r echo=FALSE}
+fancyRpartPlot(tree_cv, caption="")
+yhat_cv<-predict(tree_cv, newdata=testdata, type="class")
+confusion_matrix <- table(yhat_cv, testdata$qual2)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+```
+
+with accuracy `r round(accuracy*100,3)`%. On this occasion, the "optimal" tree in the training data does not seem to give a good performance in the test data. Specifically, most of the wines are classified as of quality 5 or 6. Indeed, most of the wines in the dataset fall within those categories, as you can see in this graph:
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+library(ggplot2)
+
+# Create the bar chart with proportions
+ggplot(traindata, aes(x = quality, y = stat(count) / sum(stat(count)))) +
+  geom_bar(aes(fill = quality), position = "dodge", width = 0.5) +
+  labs(x = "Quality of Wine", y = "Proportion") +
+  ggtitle("Proportions of Factor Variable Levels")+theme_minimal()
+
+```
+
+The next step consists on applying Bagging and Random Forest. Both methods can be applied using the function `randomForest`. Specifically, recall that the main difference between the methods is that Forest uses a randomly selected subset of explanatory variables in each split. Thus, to apply bagging we only need to set the number of randomly selected explanatory variables equal to the total number of such variables. This is achieved with the option `mtry`. The application of the command is straightforward:
+  
+  
+  
+```{r}
+bag<- randomForest(qual2~. -quality, data = traindata, method="class", mtry=12)
+yhat_bag<- predict(bag, newdata=testdata)
+confusion_matrix <- table(yhat_bag, testdata$qual2)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+
+
+```
+which has a test accuracy of `r round(accuracy,3)`. The Random Forest can be estimated as, 
+```{r}
+rf<- randomForest(qual2~. -quality, data = traindata, method="class")
+yhat_rf<- predict(rf, newdata=testdata)
+confusion_matrix <- table(yhat_rf, testdata$qual2)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+```
+which has a test accuracy of `r round(accuracy,3)`. Clearly, both bagging and random forest present a substantive advantage over CART. 
+As a final check, we can evaluate which covariates are most important in accordance to random forest. To this end, we can construct and importance plot,
+```{r}
+varImpPlot(rf)
+```
+It appears that the variable `alcohol`, capturing alcohol content of the wine, is the most important variable; interestingly, the type of wine (red or white) is not a relevant determinant of the quality (in a way expected, but for some people certainly controversial).
+  
+
