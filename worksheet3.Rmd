@@ -1,0 +1,255 @@
+---
+title: 'Worksheet 3: Machine Learning in Causal Inference'
+author: "Eduardo Fe"
+date: "2023-12-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r echo=FALSE, message=FALSE,warning=FALSE}
+library(glmnet)
+library(tidyverse)
+library(MASS)
+library(gridExtra)
+```
+
+This session will use simulated data only. Our goals are:
+- Evaluate the performance of LASSO in the settings described during the lesson.
+- Learn how to implement "partial" regularisation, leaving on variable out of the regulariser
+- Implement Robinson's estimator.
+
+### Monte Carlo Simulations.
+Monte Carlo simulation is the standard (as in the easiest) approach to evaluate how well a statistical method works in finite samples. The idea is to generate many artifical samples from the same (artificial) population and apply whichever method you are studying to the artificial data. Then you look at the distribution of the estimates and tests of hypothesis you obtain to conclude something. 
+
+Let's start by recreating the simulation in the lecture notes. This involved simulating data from a population characterised by the following model:
+$$
+Y_i = \sum_{j=1}^{100}X_{j,i}\cdot \beta_j +v_i 
+$$
+
+- $X_{j,i}$ have a multivariate normal distribution, with correlation between $X_{j,i}, X_{k,i}$ equalt to 0.1. 
+- $v_i$ follows a standard normal
+- The first ten $\beta_j$ take values 2.000, 1.789 ,1.578, 1.367, 1.156, 0.944 ,0.733, 0.522 ,0.311, 0.100
+- The remaining 90 $\beta_j$ take on a small value (between 0.001 and 0.005)
+
+We will samples of 500 observations to begin with.  We `set.seed(123)` to ensure that my results and your results are similar. 
+We start by setting up the sample size and, since we have decided that we want 100 regressors/predictors, let's store that number in an object. 
+
+```{r warning=FALSE, message=FALSE}
+n <- 500 # Sample size
+p <- 100 # Our model will have 100 predictors. 
+```
+The next thing is to generate 100 correlated predictors from a Multivariate Normal. If $\mathbf{X}_i=(X_{1,i},...X_{p,i})$, we want $\mathbf{X}\sim N(0, \Sigma)$, where $\Sigma$ is the variance-covariance matrix. We are going to set the variance of each predictor to 1 and the covariance between any two predictors to 0.4 (so that the correlation coefficient between any two predictors is 0.4). 
+```{r}
+Sigma <- matrix(0.4, p, p) # This is the variance-covariance matrix of the 100 predictors. It has 0.4 everywhere to beging with...  
+diag(Sigma) <- 1 # We set the variance to 1 by doing this.
+
+regressors <- mvrnorm(n, rep(0, p), Sigma) # Generates all p=100 predictors
+```
+Now we only have to generare $Y$ from the model specified above:
+```{r}
+set.seed(123)
+gamma <-seq(2,0.1,length =10) # The first 10 coefficients (betas)
+eps<-seq(0.001,0.005,length=p-10)  #The remaining 90 betas
+beta<-c(gamma,eps) # we put all the 100 betas together
+v <- rnorm(n) # This is the error term, 
+response <- regressors %*% beta + v # This generates the output, Y
+simData <- data.frame(regressors, response) # Finally let's store this in a data frame.
+```
+
+You can do a number of checks to verify that the covariates are normally distributed with positive correlation... Here we are just going to plot the first two covariates. We can also plot the distribution of the response (which will be also normally distributed)
+```{r fig.align='center',out.width="70%"}
+fig1<-ggplot()+geom_point(aes(x=regressors[,1],y=regressors[,2]))+theme_minimal()
+fig2<-ggplot()+geom_density(aes(x=response))+theme_minimal()
+grid.arrange(fig1, fig2, ncol=2)
+```
+That looks pretty normal...
+We can now apply a model to the data, for instance OLS,
+```{r}
+ols<-lm(response~regressors)
+coef(ols)[2] # let's print beta 1 (we use index 2 because index 1 corresponds to the intercept)
+```
+But as we said above, we want to draw many samples from the above model. So we are going to embed the above code into a loop:
+```{r eval=FALSE}
+set.seed(123)
+n <- 500 # Sample size
+p <- 100 # Our model will have 100 predictors. 
+R <- 500 # How many samples are we going to produce
+for(i in 1:R){
+  Sigma <- matrix(0.4, p, p)
+  diag(Sigma) <- 1 
+  regressors <- mvrnorm(n, rep(0, p), Sigma) 
+  gamma <-seq(2,0.1,length =10) 
+  eps<-seq(0.001,0.005,length=p-10)  
+  beta<-c(gamma,eps) 
+  v <- rnorm(n) 
+  response <- regressors %*% beta + v 
+  simData <- data.frame(regressors, response) 
+}
+```
+The most important modification is that `set.seed()` is placed OUTSIDE the loop. If you had placed this command inside the loop you would essentially draw exactly the same sample 500 times and you would then observe no variation in the estimates you'd get. 
+The finaly bit is to capture and store the results from whichever command we will use. To this end we create an empty "container" outside the loop per method we use (since we are going to be comparting OLS and a regulariser, that means we will create two different containers). Then you need to update this container inside the loop after each iteration. To begin with, let's focus on the estimate of the cofficient of $X_1$ given by LASSO and OLS:
+
+```{r }
+res.ols <- c()
+res.lasso <- c() 
+set.seed(123)
+n <- 500 # Sample size
+p <- 100 # Our model will have 100 predictors. 
+R <- 500 # How many samples are we going to produce
+for(i in 1:R){
+  Sigma <- matrix(0.4, p, p)
+  diag(Sigma) <- 1 
+  regressors <- mvrnorm(n, rep(0, p), Sigma) 
+  gamma <-seq(2,0.1,length =10) 
+  eps<-seq(0.001,0.005,length=p-10)  
+  beta<-c(gamma,eps) 
+  v <- rnorm(n) 
+  response <- regressors %*% beta + v 
+  simData <- data.frame(regressors, response) 
+  
+  # Once data are generated, estimate the models
+  
+  ols<-lm(response~regressors)
+  bhat.ols<-coef(ols)
+  
+  lasso<-cv.glmnet(regressors,response,  alpha=1)
+  best_lambda <- lasso$lambda.min 
+  bhat.lasso <- predict(lasso, s = best_lambda, type = "coefficients")
+  
+  # now get the coefficient of X1 and store it away in the container
+  res.ols <- c(res.ols, bhat.ols[2])
+  res.lasso <- c(res.lasso, bhat.lasso[2]) 
+  
+}
+# Finally, let's plot the results
+ggplot()+geom_density(aes(res.lasso))+geom_density(aes(res.ols), linetype="dashed")+
+  xlab("Value of the estimate")+
+  geom_vline(xintercept=2, color="red", linetype="dashed")+
+  theme_minimal()+
+  ylab("Density")
+
+```
+You also want the summary statistics, 
+```{r}
+mean(res.ols)
+mean(res.lasso)
+mean(res.ols-2)
+mean(res.lasso-2)
+mean(abs(res.ols-2))
+mean(abs(res.lasso-2))
+mean(ifelse(res.lasso==0,1,0))
+```
+The above results simply confirm the bias introduced by LASSO. 
+
+Next we are going to draw data from the above model but we are going to include a treatment effect which will be independent of the covariates. Having done that, we will estimate the causal effect of that new variable on the outcome using OLS and then LASSO but excluding the treatment variable from the regularisation. 
+
+```{r}
+res.ols <- c()
+res.lasso <- c() 
+set.seed(123)
+n <- 500 # Sample size
+p <- 100 # Our model will have 100 predictors. 
+R <- 500 # How many samples are we going to produce
+tau<-0.1 # Treatment effect 
+penaltyFactors<-c(0, rep(1,times=100)) # This multiplies the lambda associated with each covariate (below) 
+for(i in 1:R){
+
+  Sigma <- matrix(0.4, p, p)
+  diag(Sigma) <- 1
+  regressors <- mvrnorm(n, rep(0, p), Sigma)
+  # Create the treatment variable 
+  T<- ifelse(rnorm(n)>0, 1, 0)
+  # Add the new variable to the set of predictors
+  regressors <- cbind(T,regressors)
+  # The rest is the same...
+  error <- rnorm(n)
+  gamma <-c(tau,seq(2,0.1,length =10))
+  eps<-seq(0.001,0.005,length=p-10) 
+  beta<-c(gamma,eps)
+  response <- regressors %*% beta + error
+  simData <- data.frame(regressors, response)
+  
+  ols<-lm(response~regressors)
+  bhat.ols<-coef(ols)
+  
+  lasso<-cv.glmnet(regressors,response,  alpha=1, penalty.factor = penaltyFactors) # New bit
+  best_lambda <- lasso$lambda.min 
+  bhat.lasso <- predict(lasso, s = best_lambda, type = "coefficients")
+  
+  
+  res.ols <- c(res.ols, bhat.ols[2])
+  res.lasso <- c(res.lasso, bhat.lasso[2]) 
+}
+
+ggplot()+geom_density(aes(res.lasso))+geom_density(aes(res.ols),color="red")+
+  xlab("Value of the estimate")+geom_vline(xintercept=tau, color="red")+theme_minimal()
+
+
+mean(res.ols)
+mean(res.lasso)
+mean(res.ols-tau)
+mean(res.lasso-tau)
+mean(abs(res.ols-tau))
+mean(abs(res.lasso-tau))
+mean(ifelse(res.lasso==0,1,0))
+
+```
+
+The last task we will undertake is to deploy Robinson's estimator. 
+```{r}
+ols<-c()
+robinson<-c()
+n <- 500
+p <- 10
+R <- 500
+TAU <-2
+
+for(i in 1:R){
+
+  # The model...
+  X <- matrix(rnorm(n*p),n,p)
+  W <- rbinom(n,1,1/(1+exp(-0.5*X[,1])))
+  Y <-  W*TAU + sin(1.5*X[,1])+rnorm(n) 
+  predictors <- model.matrix(~ poly(X[,1],5))
+  
+  # Ols
+  b.ols<-coef(lm(Y~W+X))[2]
+ 
+  # The Robinson Estimator:
+  
+  # Part 1, e(X)
+  lasso<-cv.glmnet(predictors,W,  alpha=1)
+  lambdaStar<- lasso$lambda.min #Save the optimal value of Lambda
+  ehat<-W- predict(lasso, s=lambdaStar, newx=predictors)
+  
+ 
+  # Part 2, m(X)
+  lasso<-cv.glmnet(predictors,Y,  alpha=1)
+  lambdaStar<- lasso$lambda.min #Save the optimal value of Lambda
+  mhat<-Y- predict(lasso, s=lambdaStar, newx=predictors)
+  
+  b.rob<-coef(lm(mhat~ehat-1))[1]
+  ols<-c(ols,b.ols)
+  robinson<-c(robinson,b.rob)
+  
+}
+
+mean(ols)
+mean(robinson)
+mean(ols-2)
+mean(robinson-2)
+mean(abs(ols-2))
+mean(abs(robinson-2))
+
+
+ggplot()+geom_density(aes(robinson))+geom_density(aes(ols), linetype="dashed")+
+  xlab("Value of the estimate")+geom_vline(xintercept=2, color="red")+theme_minimal()+
+  ylab("Density")
+
+
+```
+
